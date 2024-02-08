@@ -6,12 +6,14 @@
 `define VGA
 // `define DVI
 
-
 module vga_pll(
     input  clk_in,
     output clk_out,
     output locked
 );
+
+    // Setup VGA 640x480@60Hz pixel clock 25.175 MHz based on iceBreaker's 12MHz master clock.
+    // For VGA timings see: https://projectf.io/posts/video-timings-vga-720p-1080p/
     SB_PLL40_PAD #(
         .FEEDBACK_PATH("SIMPLE"),
         .DIVR(4'b0000),         // DIVR =  0
@@ -27,6 +29,7 @@ module vga_pll(
     );
 endmodule
 
+// 640x480 VGA sync pulses
 module vga_sync_generator(
     input clk,
     output h_sync,
@@ -36,8 +39,9 @@ module vga_sync_generator(
     output reg[9:0] counter_v
 );
     always @(posedge clk) begin
-        h_sync <= (counter_h >= 639+16 && counter_h < 639+16+96);     // invert: negative polarity
-        v_sync <= (counter_v >= 479+10 && counter_v < 479+10+2);      // invert: negative polarity
+        // 640x480@60Hz with positive polarity works on all (2) TVs I tried so far ;)
+        h_sync <= (counter_h >= 639+16 && counter_h < 639+16+96);     // should be negavtive polarity, but my TV doesn't support it for some reason
+        v_sync <= (counter_v >= 479+10 && counter_v < 479+10+2);      // should be negavtive polarity, but my TV doesn't support it for some reason
         is_display_area <= (counter_h <= 639 && counter_v <= 479);
     end
 
@@ -90,7 +94,6 @@ module top (
 
     integer file, status, i, j;
     reg [7:0] screen_memory [0:6911];
-    // reg [7:0] screen_memory [0:13823];
     initial begin
         // for (i = 0; i < 192; i = i + 1) begin
         //     for (j = 0; j < 32; j = j + 1) begin
@@ -102,8 +105,6 @@ module top (
         // $readmemh("WonderfulDizzy_2018.scr.memh", screen_memory);
         // $readmemh("MAC_CrystalKingdomDizzy_2017.scr.memh", screen_memory);
         $readmemh("MAC_CauldronII_2016.scr.memh", screen_memory);
-        // counter = 0;
-        // loading_addr = 0;
     end
 
     reg clk_pixel;
@@ -125,26 +126,26 @@ module top (
         .counter_v(counter_v)
     );
 
-
     // scanline 224 T-states
     // '0' - 2 × 855 = 1710 T-states, '1' - 2 × 1710 = 3420 T-states.  (via https://sinclair.wiki.zxnet.co.uk/wiki/Spectrum_tape_interface)
     // ~11.5 scanlines per bit on average, ~90 scanlines per byte on average
-    localparam CLOCKS_PER_HALF_BIT = 1 * 855; //7
+    localparam CLOCKS_PER_HALF_BIT = 1 * 855; // turbo loading speed
+    // localparam CLOCKS_PER_HALF_BIT = 7 * 855; // VGA 800 * 2 scanlines / 224 t-states = ~7 - for normal loading speed 
 
-    reg [12:0] counter;
+
+    // The following code emulates ZX Spectrum loading bars on the border 
+    reg [17:0] counter;
     reg [2:0] border;
     reg [12:0] loading_addr;
     reg [2:0] loading_addr_bit;
     reg loading_bit;
-    // reg [7:0] loading_data;
-    // wire loading_bit = loading_data[7];
     always @(posedge clk_pixel) begin
         counter <= counter + 1;
 
         if (BTN1)
-            loading_addr <= 0;
+            loading_addr <= 0;          // DEBUG: restart loading
         else if (BTN3)
-            loading_addr <= 13'd6912;
+            loading_addr <= 13'd6912;   // DEBUG: jumpt to completely "loaded" image
         else if (loading_addr >= 13'd6912)
             border = 3'h0;
         else if (loading_bit == 0 && counter < CLOCKS_PER_HALF_BIT  )
@@ -162,6 +163,12 @@ module top (
         end
     end
 
+    // The following code setups ZX Spectrum 256x192 screen over the VGA signal:
+    //  * pixels are twice the size
+    //  * 128 horizontal and 96 vertical pixels for the border
+    //  - 64 + 256*2 + 64 = 640
+    //  - 48 + 192*2 + 48 = 480
+    // TODO: implement proper 50Hz PAL support!
     wire [9:0] off_sx = counter_h - 64;
     wire [9:0] off_sy = counter_v - 48;
     wire [7:0] zx_sx  = off_sx[8:1];
@@ -170,23 +177,12 @@ module top (
     wire is_zx_border = !is_zx_screen;
 
     wire [12:0] pixel_addr = {zx_sy[7:6], zx_sy[2:0], zx_sy[5:3], zx_sx[7:3]};
-    // wire [12:0] attr_addr  = 6144 + { zx_sy[7:3], zx_sx[7:3]};
-    wire [12:0] attr_addr  = {3'b110,      zx_sy[7:3],             zx_sx[7:3]};
-    // wire [7:0] pixel_block = screen_memory[pixel_addr];
-    // wire [7:0] attr_block  = screen_memory[ attr_addr];
-    // wire [7:0] pixel_block = (loading_addr >= pixel_addr) ? screen_memory[pixel_addr] : 8'h00;
-    // wire [7:0] attr_block  = (loading_addr >=  attr_addr) ? screen_memory[ attr_addr] : {2'b11, 3'h0, 3'h7};
-    // wire [7:0] loading_block = screen_memory[loading_addr];
-    
-    // wire loading_bit = loading_block[loading_bit];
+    wire [12:0] attr_addr  = {3'b110,      zx_sy[7:3],             zx_sx[7:3]}; // 6144 + { zx_sy[7:3], zx_sx[7:3]};
 
     wire pixel       = pixel_block[3'd7 - zx_sx[2:0]];
     wire bright      = is_zx_screen ? attr_block[6] : 1'b0;
     wire [2:0] ink   = attr_block[2:0];
     wire [2:0] paper = attr_block[5:3];
-    // wire [2:0] color = is_zx_screen ? (pixel ? ink : paper) : 3'h1;
-    // wire [2:0] color = is_zx_screen ? (pixel ? ink : paper) : border;
-
 
     reg [7:0] pixel_block;
     reg [7:0] attr_block;
@@ -202,6 +198,7 @@ module top (
     always @(posedge clk_pixel)
         color = is_zx_screen ? (pixel ? ink : paper) : border;
 
+    // ZX Secptrum color mapping to 12bpp RGB output
     wire [11:0] pixel_rgb;
     always @(*)
         case ({bright, color})
